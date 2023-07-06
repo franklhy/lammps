@@ -20,17 +20,44 @@ PairStyle(brownian/poly,PairBrownianPoly)
 #ifndef LMP_PAIR_BROWNIAN_POLY_H
 #define LMP_PAIR_BROWNIAN_POLY_H
 
-#include "pair_brownian.h"
+#include "pair.h"
 
 namespace LAMMPS_NS {
 
-class PairBrownianPoly : public PairBrownian {
+class PairBrownianPoly : public Pair {
  public:
   PairBrownianPoly(class LAMMPS *);
-  ~PairBrownianPoly() {}
-  void compute(int, int);
-  double init_one(int, int);
-  void init_style();
+  virtual ~PairBrownianPoly();
+  virtual void compute(int, int);
+  void settings(int, char **);
+  void coeff(int, char **);
+  virtual double init_one(int, int);
+  virtual void init_style();
+  void write_restart(FILE *);
+  void read_restart(FILE *);
+  void write_restart_settings(FILE *);
+  void read_restart_settings(FILE *);
+
+  virtual double single(int, int, int, int, double, double, double, double &);
+
+ protected:
+  double cut_inner_global,cut_global;
+  double t_target,mu;
+  int flaglog,flagfld;
+  int flagHI, flagVF;
+  int flagdeform, flagwall;
+  double vol_P;
+  double rad;
+  class FixWall *wallfix;
+
+  int seed;
+  double **cut_inner,**cut;
+  double R0,RT0;
+
+  class RanMars *random;
+
+  void set_3_orthogonal_vectors(double*,double*,double*);
+  void allocate();
 };
 
 }
@@ -40,17 +67,35 @@ class PairBrownianPoly : public PairBrownian {
 
 /* ERROR/WARNING messages:
 
-E: Pair brownian/poly requires newton pair off
+E: Illegal ... command
+
+Self-explanatory.  Check the input script syntax and compare to the
+documentation for the command.  You can use -echo screen as a
+command-line option when running LAMMPS to see the offending line.
+
+W: Cannot include log terms without 1/r terms; setting flagHI to 1
 
 Self-explanatory.
 
-E: Pair brownian/poly requires atom style sphere
+E: Incorrect args for pair coefficients
+
+Self-explanatory.  Check the input script or data file.
+
+E: Pair brownian requires atom style sphere
 
 Self-explanatory.
 
-E: Pair brownian/poly requires extended particles
+W: Pair brownian needs newton pair on for momentum conservation
+
+Self-explanatory.
+
+E: Pair brownian requires extended particles
 
 One of the particles has radius 0.0.
+
+E: Pair brownian requires monodisperse particles
+
+All particles must be the same finite size.
 
 E: Cannot use multiple fix wall commands with pair brownian
 

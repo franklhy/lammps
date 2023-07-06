@@ -13,7 +13,8 @@
 
 /* ----------------------------------------------------------------------
    Contributing authors: Amit Kumar and Michael Bybee (UIUC)
-                         Dave Heine (Corning), polydispersity
+						 Dave Heine (Corning), polydispersity
+   			             Jiting Tian (CAEP, INPC), polydispersity
 ------------------------------------------------------------------------- */
 
 #include "pair_brownian_poly.h"
@@ -21,10 +22,10 @@
 #include <cmath>
 #include <cstring>
 #include "atom.h"
+#include "comm.h"
 #include "force.h"
 #include "neighbor.h"
 #include "neigh_list.h"
-#include "neigh_request.h"
 #include "domain.h"
 #include "update.h"
 #include "modify.h"
@@ -35,7 +36,9 @@
 #include "random_mars.h"
 #include "math_const.h"
 #include "math_special.h"
+#include "memory.h"
 #include "error.h"
+
 
 using namespace LAMMPS_NS;
 using namespace MathConst;
@@ -47,9 +50,24 @@ enum{EDGE,CONSTANT,VARIABLE};
 
 /* ---------------------------------------------------------------------- */
 
-PairBrownianPoly::PairBrownianPoly(LAMMPS *lmp) : PairBrownian(lmp)
+PairBrownianPoly::PairBrownianPoly(LAMMPS *lmp) : Pair(lmp)
 {
-  no_virial_fdotr_compute = 1;
+  single_enable = 1;
+  random = nullptr;
+}
+
+/* ---------------------------------------------------------------------- */
+
+PairBrownianPoly::~PairBrownianPoly()
+{
+  if (allocated) {
+    memory->destroy(setflag);
+    memory->destroy(cutsq);
+
+    memory->destroy(cut);
+    memory->destroy(cut_inner);
+  }
+  delete random;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -69,6 +87,7 @@ void PairBrownianPoly::compute(int eflag, int vflag)
   double *radius = atom->radius;
   int *type = atom->type;
   int nlocal = atom->nlocal;
+  int newton_pair = force->newton_pair;
 
   double vxmu2f = force->vxmu2f;
   int overlaps = 0;
@@ -84,8 +103,9 @@ void PairBrownianPoly::compute(int eflag, int vflag)
   if (flagVF) // Flag for volume fraction corrections
     if (flagdeform || flagwall == 2){ // Possible changes in volume fraction
       if (flagdeform && !flagwall)
-        for (j = 0; j < 3; j++)
+        for (j = 0; j < 3; j++) {
           dims[j] = domain->prd[j];
+        }
       else if (flagwall == 2 || (flagdeform && flagwall == 1)){
         double wallhi[3], walllo[3];
         for (j = 0; j < 3; j++){
@@ -108,12 +128,12 @@ void PairBrownianPoly::compute(int eflag, int vflag)
       double vol_T = dims[0]*dims[1]*dims[2];
       double vol_f = vol_P/vol_T;
       if (flaglog == 0) {
-        R0  = 6*MY_PI*mu*rad*(1.0 + 2.16*vol_f);
-        RT0 = 8*MY_PI*mu*cube(rad);
+        R0  = 6*MY_PI*mu*(1.0 + 2.16*vol_f);
+        RT0 = 8*MY_PI*mu;
         //RS0 = 20.0/3.0*MY_PI*mu*pow(rad,3)*(1.0 + 3.33*vol_f + 2.80*vol_f*vol_f);
       } else {
-        R0  = 6*MY_PI*mu*rad*(1.0 + 2.725*vol_f - 6.583*vol_f*vol_f);
-        RT0 = 8*MY_PI*mu*cube(rad)*(1.0 + 0.749*vol_f - 2.469*vol_f*vol_f);
+        R0  = 6*MY_PI*mu*(1.0 + 2.725*vol_f - 6.583*vol_f*vol_f);
+        RT0 = 8*MY_PI*mu*(1.0 + 0.749*vol_f - 2.469*vol_f*vol_f);
         //RS0 = 20.0/3.0*MY_PI*mu*pow(rad,3)*(1.0 + 3.64*vol_f - 6.95*vol_f*vol_f);
       }
     }
@@ -126,8 +146,6 @@ void PairBrownianPoly::compute(int eflag, int vflag)
   ilist = list->ilist;
   numneigh = list->numneigh;
   firstneigh = list->firstneigh;
-
-
   for (ii = 0; ii < inum; ii++) {
     i = ilist[ii];
     xtmp = x[i][0];
@@ -262,7 +280,16 @@ void PairBrownianPoly::compute(int eflag, int vflag)
         f[i][0] -= fx;
         f[i][1] -= fy;
         f[i][2] -= fz;
+		
+		// use Newton's third law
+		
+        if (newton_pair || j < nlocal) {
 
+          f[j][0] += fx;
+          f[j][1] += fy;
+          f[j][2] += fz;
+        }
+		
         // torque due to the Brownian Force
 
         if (flaglog) {
@@ -306,16 +333,123 @@ void PairBrownianPoly::compute(int eflag, int vflag)
           torque[i][0] -= tx;
           torque[i][1] -= ty;
           torque[i][2] -= tz;
-
+		  
+		  // use Newton's third law
+		  
+          if (newton_pair || j < nlocal) {
+            torque[j][0] += tx;
+            torque[j][1] += ty;
+            torque[j][2] += tz;
+          }
         }
 
-        // set j = nlocal so that only I gets tallied
-
-        if (evflag) ev_tally_xyz(i,nlocal,nlocal,0,
+        if (evflag) ev_tally_xyz(i,j,nlocal,newton_pair,
                                  0.0,0.0,-fx,-fy,-fz,delx,dely,delz);
       }
     }
   }
+
+  if (vflag_fdotr) virial_fdotr_compute();
+}
+
+/* ----------------------------------------------------------------------
+   allocate all arrays
+------------------------------------------------------------------------- */
+
+void PairBrownianPoly::allocate()
+{
+  allocated = 1;
+  int n = atom->ntypes;
+
+  memory->create(setflag,n+1,n+1,"pair:setflag");
+  for (int i = 1; i <= n; i++)
+    for (int j = i; j <= n; j++)
+      setflag[i][j] = 0;
+
+  memory->create(cutsq,n+1,n+1,"pair:cutsq");
+
+  memory->create(cut,n+1,n+1,"pair:cut");
+  memory->create(cut_inner,n+1,n+1,"pair:cut_inner");
+}
+
+/* ----------------------------------------------------------------------
+   global settings
+------------------------------------------------------------------------- */
+
+void PairBrownianPoly::settings(int narg, char **arg)
+{
+  if (narg != 7 && narg != 9) error->all(FLERR,"Illegal pair_style command");
+
+  mu = utils::numeric(FLERR,arg[0],false,lmp);
+  flaglog = utils::inumeric(FLERR,arg[1],false,lmp);
+  flagfld = utils::inumeric(FLERR,arg[2],false,lmp);
+  cut_inner_global = utils::numeric(FLERR,arg[3],false,lmp);
+  cut_global = utils::numeric(FLERR,arg[4],false,lmp);
+  t_target = utils::numeric(FLERR,arg[5],false,lmp);
+  seed = utils::inumeric(FLERR,arg[6],false,lmp);
+
+  flagHI = flagVF = 1;
+  if (narg == 9) {
+    flagHI = utils::inumeric(FLERR,arg[7],false,lmp);
+    flagVF = utils::inumeric(FLERR,arg[8],false,lmp);
+  }
+
+  if (flaglog == 1 && flagHI == 0) {
+    error->warning(FLERR,"Cannot include log terms without 1/r terms; "
+                   "setting flagHI to 1");
+    flagHI = 1;
+  }
+
+  // initialize Marsaglia RNG with processor-unique seed
+
+  delete random;
+  random = new RanMars(lmp,seed + comm->me);
+
+  // reset cutoffs that have been explicitly set
+
+  if (allocated) {
+    for (int i = 1; i <= atom->ntypes; i++)
+      for (int j = i; j <= atom->ntypes; j++)
+        if (setflag[i][j]) {
+          cut_inner[i][j] = cut_inner_global;
+          cut[i][j] = cut_global;
+        }
+  }
+}
+
+/* ----------------------------------------------------------------------
+   set coeffs for one or more type pairs
+------------------------------------------------------------------------- */
+
+void PairBrownianPoly::coeff(int narg, char **arg)
+{
+  if (narg != 2 && narg != 4)
+    error->all(FLERR,"Incorrect args for pair coefficients");
+
+  if (!allocated) allocate();
+
+  int ilo,ihi,jlo,jhi;
+  utils::bounds(FLERR,arg[0],1,atom->ntypes,ilo,ihi,error);
+  utils::bounds(FLERR,arg[1],1,atom->ntypes,jlo,jhi,error);
+
+  double cut_inner_one = cut_inner_global;
+  double cut_one = cut_global;
+
+  if (narg == 4) {
+    cut_inner_one = utils::numeric(FLERR,arg[2],false,lmp);
+    cut_one = utils::numeric(FLERR,arg[3],false,lmp);
+  }
+
+  int count = 0;
+  for (int i = ilo; i <= ihi; i++)
+    for (int j = MAX(jlo,i); j <= jhi; j++) {
+      cut_inner[i][j] = cut_inner_one;
+      cut[i][j] = cut_one;
+      setflag[i][j] = 1;
+      count++;
+    }
+
+  if (count == 0) error->all(FLERR,"Incorrect args for pair coefficients");
 }
 
 /* ----------------------------------------------------------------------
@@ -324,10 +458,18 @@ void PairBrownianPoly::compute(int eflag, int vflag)
 
 void PairBrownianPoly::init_style()
 {
-  if (force->newton_pair == 1)
-    error->all(FLERR,"Pair brownian/poly requires newton pair off");
   if (!atom->sphere_flag)
-    error->all(FLERR,"Pair brownian/poly requires atom style sphere");
+    error->all(FLERR,"Pair brownian requires atom style sphere");
+
+  // if newton off, forces between atoms ij will be double computed
+  // using different random numbers
+
+  if (force->newton_pair == 0)
+    error->all(FLERR,
+                   "Pair brownian/poly requires newton pair on for "
+                   "momentum conservation");
+
+  neighbor->request(this,instance_me);
 
   // insure all particles are finite-size
   // for pair hybrid, should limit test to types using the pair style
@@ -337,11 +479,7 @@ void PairBrownianPoly::init_style()
 
   for (int i = 0; i < nlocal; i++)
     if (radius[i] == 0.0)
-      error->one(FLERR,"Pair brownian/poly requires extended particles");
-
-  int irequest = neighbor->request(this,instance_me);
-  neighbor->requests[irequest]->half = 0;
-  neighbor->requests[irequest]->full = 1;
+      error->one(FLERR,"Pair brownian requires extended particles");
 
   // set the isotropic constants that depend on the volume fraction
   // vol_T = total volume
@@ -368,12 +506,13 @@ void PairBrownianPoly::init_style()
     }
   }
 
-  // set the isotropic constants that depend on the volume fraction
-  // vol_T = total volume
+  // set the isotropic constants depending on the volume fraction
+  // vol_T = total volumeshearing = flagdeform = flagwall = 0;
 
   double vol_T, wallcoord;
-  if (!flagwall) vol_T = domain->xprd*domain->yprd*domain->zprd;
-  else {
+  if (!flagwall) {
+      vol_T = domain->xprd*domain->yprd*domain->zprd;
+  } else {
     double wallhi[3], walllo[3];
     for (int j = 0; j < 3; j++){
       wallhi[j] = domain->prd[j];
@@ -397,7 +536,7 @@ void PairBrownianPoly::init_style()
       (wallhi[2] - walllo[2]);
   }
 
-  // vol_P = volume of particles, assuming mono-dispersity
+  // vol_P = volume of particles
   // vol_f = volume fraction
 
   double volP = 0.0;
@@ -407,12 +546,12 @@ void PairBrownianPoly::init_style()
 
   double vol_f = vol_P/vol_T;
 
-  if (!flagVF) vol_f = 0;
   // set isotropic constants
+  if (!flagVF) vol_f = 0;
 
   if (flaglog == 0) {
     R0  = 6*MY_PI*mu*(1.0 + 2.16*vol_f);
-    RT0 = 8*MY_PI*mu;
+    RT0 = 8*MY_PI*mu;  // not actually needed
   } else {
     R0  = 6*MY_PI*mu*(1.0 + 2.725*vol_f - 6.583*vol_f*vol_f);
     RT0 = 8*MY_PI*mu*(1.0 + 0.749*vol_f - 2.469*vol_f*vol_f);
@@ -431,5 +570,173 @@ double PairBrownianPoly::init_one(int i, int j)
   }
 
   cut_inner[j][i] = cut_inner[i][j];
+
   return cut[i][j];
 }
+
+/* ----------------------------------------------------------------------
+   proc 0 writes to restart file
+------------------------------------------------------------------------- */
+
+void PairBrownianPoly::write_restart(FILE *fp)
+{
+  write_restart_settings(fp);
+
+  int i,j;
+  for (i = 1; i <= atom->ntypes; i++)
+    for (j = i; j <= atom->ntypes; j++) {
+      fwrite(&setflag[i][j],sizeof(int),1,fp);
+      if (setflag[i][j]) {
+        fwrite(&cut_inner[i][j],sizeof(double),1,fp);
+        fwrite(&cut[i][j],sizeof(double),1,fp);
+      }
+    }
+}
+
+/* ----------------------------------------------------------------------
+   proc 0 reads from restart file, bcasts
+------------------------------------------------------------------------- */
+
+void PairBrownianPoly::read_restart(FILE *fp)
+{
+  read_restart_settings(fp);
+  allocate();
+
+  int i,j;
+  int me = comm->me;
+  for (i = 1; i <= atom->ntypes; i++)
+    for (j = i; j <= atom->ntypes; j++) {
+      if (me == 0) utils::sfread(FLERR,&setflag[i][j],sizeof(int),1,fp,nullptr,error);
+      MPI_Bcast(&setflag[i][j],1,MPI_INT,0,world);
+      if (setflag[i][j]) {
+        if (me == 0) {
+          utils::sfread(FLERR,&cut_inner[i][j],sizeof(double),1,fp,nullptr,error);
+          utils::sfread(FLERR,&cut[i][j],sizeof(double),1,fp,nullptr,error);
+        }
+        MPI_Bcast(&cut_inner[i][j],1,MPI_DOUBLE,0,world);
+        MPI_Bcast(&cut[i][j],1,MPI_DOUBLE,0,world);
+      }
+    }
+}
+
+/* ----------------------------------------------------------------------
+   proc 0 writes to restart file
+------------------------------------------------------------------------- */
+
+void PairBrownianPoly::write_restart_settings(FILE *fp)
+{
+  fwrite(&mu,sizeof(double),1,fp);
+  fwrite(&flaglog,sizeof(int),1,fp);
+  fwrite(&flagfld,sizeof(int),1,fp);
+  fwrite(&cut_inner_global,sizeof(double),1,fp);
+  fwrite(&cut_global,sizeof(double),1,fp);
+  fwrite(&t_target,sizeof(double),1,fp);
+  fwrite(&seed,sizeof(int),1,fp);
+  fwrite(&offset_flag,sizeof(int),1,fp);
+  fwrite(&mix_flag,sizeof(int),1,fp);
+  fwrite(&flagHI,sizeof(int),1,fp);
+  fwrite(&flagVF,sizeof(int),1,fp);
+}
+
+/* ----------------------------------------------------------------------
+   proc 0 reads from restart file, bcasts
+------------------------------------------------------------------------- */
+
+void PairBrownianPoly::read_restart_settings(FILE *fp)
+{
+  int me = comm->me;
+  if (me == 0) {
+    utils::sfread(FLERR,&mu,sizeof(double),1,fp,nullptr,error);
+    utils::sfread(FLERR,&flaglog,sizeof(int),1,fp,nullptr,error);
+    utils::sfread(FLERR,&flagfld,sizeof(int),1,fp,nullptr,error);
+    utils::sfread(FLERR,&cut_inner_global,sizeof(double),1,fp,nullptr,error);
+    utils::sfread(FLERR,&cut_global,sizeof(double),1,fp,nullptr,error);
+    utils::sfread(FLERR,&t_target, sizeof(double),1,fp,nullptr,error);
+    utils::sfread(FLERR,&seed, sizeof(int),1,fp,nullptr,error);
+    utils::sfread(FLERR,&offset_flag,sizeof(int),1,fp,nullptr,error);
+    utils::sfread(FLERR,&mix_flag,sizeof(int),1,fp,nullptr,error);
+    utils::sfread(FLERR,&flagHI,sizeof(int),1,fp,nullptr,error);
+    utils::sfread(FLERR,&flagVF,sizeof(int),1,fp,nullptr,error);
+  }
+  MPI_Bcast(&mu,1,MPI_DOUBLE,0,world);
+  MPI_Bcast(&flaglog,1,MPI_INT,0,world);
+  MPI_Bcast(&flagfld,1,MPI_INT,0,world);
+  MPI_Bcast(&cut_inner_global,1,MPI_DOUBLE,0,world);
+  MPI_Bcast(&cut_global,1,MPI_DOUBLE,0,world);
+  MPI_Bcast(&t_target,1,MPI_DOUBLE,0,world);
+  MPI_Bcast(&seed,1,MPI_INT,0,world);
+  MPI_Bcast(&offset_flag,1,MPI_INT,0,world);
+  MPI_Bcast(&mix_flag,1,MPI_INT,0,world);
+  MPI_Bcast(&flagHI,1,MPI_INT,0,world);
+  MPI_Bcast(&flagVF,1,MPI_INT,0,world);
+
+  // additional setup based on restart parameters
+
+  delete random;
+  random = new RanMars(lmp,seed + comm->me);
+}
+
+/* ----------------------------------------------------------------------*/
+
+void PairBrownianPoly::set_3_orthogonal_vectors(double p1[3],
+                                            double p2[3], double p3[3])
+{
+  double norm;
+  int ix,iy,iz;
+
+  // find the index of maximum magnitude and store it in iz
+
+  if (fabs(p1[0]) > fabs(p1[1])) {
+    iz=0;
+    ix=1;
+    iy=2;
+  } else {
+    iz=1;
+    ix=2;
+    iy=0;
+  }
+
+  if (iz==0) {
+    if (fabs(p1[0]) < fabs(p1[2])) {
+      iz = 2;
+      ix = 0;
+      iy = 1;
+    }
+  } else {
+    if (fabs(p1[1]) < fabs(p1[2])) {
+      iz = 2;
+      ix = 0;
+      iy = 1;
+    }
+  }
+
+  // set p2 arbitrarily such that it's orthogonal to p1
+
+  p2[ix]=1.0;
+  p2[iy]=1.0;
+  p2[iz] = -(p1[ix]*p2[ix] + p1[iy]*p2[iy])/p1[iz];
+
+  // normalize p2
+
+  norm = sqrt(p2[0]*p2[0] + p2[1]*p2[1] + p2[2]*p2[2]);
+
+  p2[0] = p2[0]/norm;
+  p2[1] = p2[1]/norm;
+  p2[2] = p2[2]/norm;
+
+  // Set p3 by taking the cross product p3=p2xp1
+
+  p3[0] = p1[1]*p2[2] - p1[2]*p2[1];
+  p3[1] = p1[2]*p2[0] - p1[0]*p2[2];
+  p3[2] = p1[0]*p2[1] - p1[1]*p2[0];
+}
+
+
+double PairBrownianPoly::single(int i, int j, int /*itype*/, int /*jtype*/,
+                                double rsq,
+                                double /*factor_coul*/, double /*factor_lj*/,
+                                double &fforce)
+{
+  return 0;
+}
+

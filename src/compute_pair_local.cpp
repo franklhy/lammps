@@ -256,6 +256,7 @@ int ComputePairLocal::compute_pairs(int flag)
       }
 
       if (flag) {
+        //printf("i=%d, j=%d, singleflag=%d, cutoff=%f, cutstyle=%d (TYPE=%d,RADIUS=%d),", i, j, singleflag, cutsq[itype][jtype], cutstyle, TYPE, RADIUS); //testing, by Heyi
         if (singleflag)
           eng = pair->single(i,j,itype,jtype,rsq,factor_coul,factor_lj,fpair);
         else eng = fpair = 0.0;
@@ -287,10 +288,12 @@ int ComputePairLocal::compute_pairs(int flag)
             ptr[n] = pair->svector[pindex[n]];
             break;
           }
+        //printf("\t%f", ptr[n]); //testing, by Heyi
         }
       }
 
       m++;
+      //printf("\n"); //testing, by Heyi
     }
   }
 

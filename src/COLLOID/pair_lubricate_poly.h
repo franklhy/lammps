@@ -20,16 +20,45 @@ PairStyle(lubricate/poly,PairLubricatePoly)
 #ifndef LMP_PAIR_LUBRICATE_POLY_H
 #define LMP_PAIR_LUBRICATE_POLY_H
 
-#include "pair_lubricate.h"
+#include "pair.h"
 
 namespace LAMMPS_NS {
 
-class PairLubricatePoly : public PairLubricate {
+class PairLubricatePoly : public Pair {
  public:
   PairLubricatePoly(class LAMMPS *);
-  ~PairLubricatePoly() {}
-  void compute(int, int);
-  void init_style();
+  virtual ~PairLubricatePoly();
+  virtual void compute(int, int);
+  void settings(int, char **);
+  void coeff(int, char **);
+  double init_one(int, int);
+  virtual void init_style();
+  void write_restart(FILE *);
+  void read_restart(FILE *);
+  void write_restart_settings(FILE *);
+  void read_restart_settings(FILE *);
+  int pre_adapt(char *, int, int, int, int);
+  void adapt(int, int, int, int, int, double);
+
+  int pack_forward_comm(int, int *, double *, int, int *);
+  void unpack_forward_comm(int, int, double *);
+
+  virtual double single(int, int, int, int, double, double, double, double &);
+
+ protected:
+  double mu,cut_inner_global,cut_global;
+  double rad;
+  int flaglog,flagfld,shearing;
+  int flagdeform, flagwall;
+  double vol_P;
+  class FixWall *wallfix;
+  int flagVF, flagHI;
+
+  double Ef[3][3];
+  double R0,RT0,RS0;
+  double **cut_inner,**cut;
+
+  void allocate();
 };
 
 }
@@ -39,32 +68,34 @@ class PairLubricatePoly : public PairLubricate {
 
 /* ERROR/WARNING messages:
 
-E: Pair lubricate/poly requires newton pair off
+E: Illegal ... command
+
+Self-explanatory.  Check the input script syntax and compare to the
+documentation for the command.  You can use -echo screen as a
+command-line option when running LAMMPS to see the offending line.
+
+W: Cannot include log terms without 1/r terms; setting flagHI to 1
 
 Self-explanatory.
 
-E: Pair lubricate/poly requires ghost atoms store velocity
+E: Incorrect args for pair coefficients
+
+Self-explanatory.  Check the input script or data file.
+
+E: Pair lubricate requires atom style sphere
+
+Self-explanatory.
+
+E: Pair lubricate requires ghost atoms store velocity
 
 Use the comm_modify vel yes command to enable this.
-
-E: Pair lubricate/poly requires atom style sphere
-
-Self-explanatory.
-
-E: Pair lubricate/poly requires extended particles
-
-One of the particles has radius 0.0.
 
 E: Using pair lubricate with inconsistent fix deform remap option
 
 Must use remap v option with fix deform with this pair style.
 
-E: Cannot use multiple fix wall commands with pair lubricate/poly
+E: Cannot use multiple fix wall commands with pair lubricate
 
 Self-explanatory.
-
-E: Using pair lubricate/poly with inconsistent fix deform remap option
-
-If fix deform is used, the remap v option is required.
 
 */

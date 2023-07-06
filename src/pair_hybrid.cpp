@@ -809,6 +809,7 @@ double PairHybrid::single(int i, int j, int itype, int jtype,
   double esum = 0.0;
 
   for (int m = 0; m < nmap[itype][jtype]; m++) {
+    /*
     if (rsq < styles[map[itype][jtype][m]]->cutsq[itype][jtype]) {
       if (styles[map[itype][jtype][m]]->single_enable == 0)
         error->one(FLERR,"Pair hybrid sub-style does not support single call");
@@ -822,6 +823,10 @@ double PairHybrid::single(int i, int j, int itype, int jtype,
         single(i,j,itype,jtype,rsq,factor_coul,factor_lj,fone);
       fforce += fone;
     }
+    */  // Heyi
+    esum += styles[map[itype][jtype][m]]->
+      single(i,j,itype,jtype,rsq,factor_coul,factor_lj,fone);    // Heyi
+    fforce += fone;    // Heyi
   }
 
   if (single_extra) copy_svector(itype,jtype);

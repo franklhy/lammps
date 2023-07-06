@@ -14,7 +14,7 @@
 /* ----------------------------------------------------------------------
    Contributing authors: Randy Schunk (SNL)
                          Amit Kumar and Michael Bybee (UIUC)
-                         Dave Heine (Corning), polydispersity
+			             Jiting Tian (CAEP, INPC)
 ------------------------------------------------------------------------- */
 
 #include "pair_lubricate_poly.h"
@@ -26,7 +26,6 @@
 #include "force.h"
 #include "neighbor.h"
 #include "neigh_list.h"
-#include "neigh_request.h"
 #include "domain.h"
 #include "modify.h"
 #include "fix.h"
@@ -35,20 +34,39 @@
 #include "input.h"
 #include "variable.h"
 #include "math_const.h"
+#include "memory.h"
 #include "error.h"
+
 
 using namespace LAMMPS_NS;
 using namespace MathConst;
 
 // same as fix_wall.cpp
 
-enum{EDGE,CONSTANT,VARIABLE};
+enum{NONE=0,EDGE,CONSTANT,VARIABLE};
 
 /* ---------------------------------------------------------------------- */
 
-PairLubricatePoly::PairLubricatePoly(LAMMPS *lmp) : PairLubricate(lmp)
+PairLubricatePoly::PairLubricatePoly(LAMMPS *lmp) : Pair(lmp)
 {
-  no_virial_fdotr_compute = 1;
+  single_enable = 1;
+
+  // set comm size needed by this Pair
+
+  comm_forward = 6;
+}
+
+/* ---------------------------------------------------------------------- */
+
+PairLubricatePoly::~PairLubricatePoly()
+{
+  if (allocated) {
+    memory->destroy(setflag);
+    memory->destroy(cutsq);
+
+    memory->destroy(cut);
+    memory->destroy(cut_inner);
+  }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -270,12 +288,12 @@ void PairLubricatePoly::compute(int eflag, int vflag)
 
         // scalar resistances XA and YA
 
-        h_sep = r - radi-radj;
+        h_sep = r - radi - radj;
 
         // if less than the minimum gap use the minimum gap instead
 
         if (r < cut_inner[itype][jtype])
-          h_sep = cut_inner[itype][jtype] - radi-radj;
+          h_sep = cut_inner[itype][jtype] - radi - radj;
 
         // scale h_sep by radi
 
@@ -356,6 +374,14 @@ void PairLubricatePoly::compute(int eflag, int vflag)
         f[i][1] -= fy;
         f[i][2] -= fz;
 
+		// use Newton's third law
+
+        if (newton_pair || j < nlocal) {
+          f[j][0] += fx;
+          f[j][1] += fy;
+          f[j][2] += fz;
+        }
+
         // torque due to this force
 
         if (flaglog) {
@@ -382,12 +408,17 @@ void PairLubricatePoly::compute(int eflag, int vflag)
           torque[i][0] -= vxmu2f*tx;
           torque[i][1] -= vxmu2f*ty;
           torque[i][2] -= vxmu2f*tz;
-
+		  
+		  // use Newton's third law
+		  
+          if (newton_pair || j < nlocal) {
+            torque[j][0] += vxmu2f*tx;
+            torque[j][1] += vxmu2f*ty;
+            torque[j][2] += vxmu2f*tz;
+          }
         }
 
-        // set j = nlocal so that only I gets tallied
-
-        if (evflag) ev_tally_xyz(i,nlocal,nlocal,0,
+        if (evflag) ev_tally_xyz(i,j,nlocal,newton_pair,
                                  0.0,0.0,-fx,-fy,-fz,delx,dely,delz);
       }
     }
@@ -402,7 +433,7 @@ void PairLubricatePoly::compute(int eflag, int vflag)
     for (ii = 0; ii < inum; ii++) {
       i = ilist[ii];
       itype = type[i];
-      radi = atom->radius[i];
+      radi = radius[i];
 
       domain->x2lamda(x[i],lamda);
       vstream[0] = h_rate[0]*lamda[0] + h_rate[5]*lamda[1] +
@@ -418,6 +449,101 @@ void PairLubricatePoly::compute(int eflag, int vflag)
       omega[i][2] -= 0.5*h_rate[5];
     }
   }
+
+  if (vflag_fdotr) virial_fdotr_compute();
+}
+
+/* ----------------------------------------------------------------------
+   allocate all arrays
+------------------------------------------------------------------------- */
+
+void PairLubricatePoly::allocate()
+{
+  allocated = 1;
+  int n = atom->ntypes;
+
+  memory->create(setflag,n+1,n+1,"pair:setflag");
+  for (int i = 1; i <= n; i++)
+    for (int j = i; j <= n; j++)
+      setflag[i][j] = 0;
+
+  memory->create(cutsq,n+1,n+1,"pair:cutsq");
+
+  memory->create(cut,n+1,n+1,"pair:cut");
+  memory->create(cut_inner,n+1,n+1,"pair:cut_inner");
+}
+
+/* ----------------------------------------------------------------------
+   global settings
+------------------------------------------------------------------------- */
+
+void PairLubricatePoly::settings(int narg, char **arg)
+{
+  if (narg != 5 && narg != 7) error->all(FLERR,"Illegal pair_style command");
+
+  mu = utils::numeric(FLERR,arg[0],false,lmp);
+  flaglog = utils::inumeric(FLERR,arg[1],false,lmp);
+  flagfld = utils::inumeric(FLERR,arg[2],false,lmp);
+  cut_inner_global = utils::numeric(FLERR,arg[3],false,lmp);
+  cut_global = utils::numeric(FLERR,arg[4],false,lmp);
+
+  flagHI = flagVF = 1;
+  if (narg == 7) {
+    flagHI = utils::inumeric(FLERR,arg[5],false,lmp);
+    flagVF = utils::inumeric(FLERR,arg[6],false,lmp);
+  }
+
+  if (flaglog == 1 && flagHI == 0) {
+    error->warning(FLERR,"Cannot include log terms without 1/r terms; "
+                   "setting flagHI to 1");
+    flagHI = 1;
+  }
+
+  // reset cutoffs that have been explicitly set
+
+  if (allocated) {
+    for (int i = 1; i <= atom->ntypes; i++)
+      for (int j = i; j <= atom->ntypes; j++)
+        if (setflag[i][j]) {
+          cut_inner[i][j] = cut_inner_global;
+          cut[i][j] = cut_global;
+        }
+  }
+}
+
+/* ----------------------------------------------------------------------
+   set coeffs for one or more type pairs
+------------------------------------------------------------------------- */
+
+void PairLubricatePoly::coeff(int narg, char **arg)
+{
+  if (narg != 2 && narg != 4)
+    error->all(FLERR,"Incorrect args for pair coefficients");
+
+  if (!allocated) allocate();
+
+  int ilo,ihi,jlo,jhi;
+  utils::bounds(FLERR,arg[0],1,atom->ntypes,ilo,ihi,error);
+  utils::bounds(FLERR,arg[1],1,atom->ntypes,jlo,jhi,error);
+
+  double cut_inner_one = cut_inner_global;
+  double cut_one = cut_global;
+  if (narg == 4) {
+    cut_inner_one = utils::numeric(FLERR,arg[2],false,lmp);
+    cut_one = utils::numeric(FLERR,arg[3],false,lmp);
+  }
+
+  int count = 0;
+  for (int i = ilo; i <= ihi; i++) {
+    for (int j = MAX(jlo,i); j <= jhi; j++) {
+      cut_inner[i][j] = cut_inner_one;
+      cut[i][j] = cut_one;
+      setflag[i][j] = 1;
+      count++;
+    }
+  }
+
+  if (count == 0) error->all(FLERR,"Incorrect args for pair coefficients");
 }
 
 /* ----------------------------------------------------------------------
@@ -426,36 +552,19 @@ void PairLubricatePoly::compute(int eflag, int vflag)
 
 void PairLubricatePoly::init_style()
 {
-  if (force->newton_pair == 1)
-    error->all(FLERR,"Pair lubricate/poly requires newton pair off");
-  if (comm->ghost_velocity == 0)
-    error->all(FLERR,
-               "Pair lubricate/poly requires ghost atoms store velocity");
   if (!atom->sphere_flag)
     error->all(FLERR,"Pair lubricate/poly requires atom style sphere");
+  if (comm->ghost_velocity == 0)
+    error->all(FLERR,"Pair lubricate/poly requires ghost atoms store velocity");
 
-  // ensure all particles are finite-size
-  // for pair hybrid, should limit test to types using the pair style
-
-  double *radius = atom->radius;
+  neighbor->request(this,instance_me);
   int nlocal = atom->nlocal;
-
-  for (int i = 0; i < nlocal; i++)
-    if (radius[i] == 0.0)
-      error->one(FLERR,"Pair lubricate/poly requires extended particles");
-
-  int irequest = neighbor->request(this,instance_me);
-  neighbor->requests[irequest]->half = 0;
-  neighbor->requests[irequest]->full = 1;
-
-  // set the isotropic constants that depend on the volume fraction
-  // vol_T = total volume
 
   // check for fix deform, if exists it must use "remap v"
   // If box will change volume, set appropriate flag so that volume
   // and v.f. corrections are re-calculated at every step.
-
-  // if available volume is different from box volume
+  //
+  // If available volume is different from box volume
   // due to walls, set volume appropriately; if walls will
   // move, set appropriate flag so that volume and v.f. corrections
   // are re-calculated at every step.
@@ -465,27 +574,21 @@ void PairLubricatePoly::init_style()
     if (strcmp(modify->fix[i]->style,"deform") == 0) {
       shearing = flagdeform = 1;
       if (((FixDeform *) modify->fix[i])->remapflag != Domain::V_REMAP)
-        error->all(FLERR,"Using pair lubricate with inconsistent "
+        error->all(FLERR,"Using pair lubricate/poly with inconsistent "
                    "fix deform remap option");
     }
     if (strstr(modify->fix[i]->style,"wall") != nullptr) {
       if (flagwall)
         error->all(FLERR,
-                   "Cannot use multiple fix wall commands with "
-                   "pair lubricate/poly");
+                   "Cannot use multiple fix wall commands with pair lubricate/poly");
       flagwall = 1; // Walls exist
       wallfix = (FixWall *) modify->fix[i];
       if (wallfix->xflag) flagwall = 2; // Moving walls exist
     }
-
-    if (strstr(modify->fix[i]->style,"wall") != nullptr){
-      flagwall = 1; // Walls exist
-      if (((FixWall *) modify->fix[i])->xflag ) {
-        flagwall = 2; // Moving walls exist
-        wallfix = (FixWall *) modify->fix[i];
-      }
-    }
   }
+
+  // set the isotropic constants that depend on the volume fraction
+  // vol_T = total volume
 
   double vol_T;
   double wallcoord;
@@ -496,6 +599,7 @@ void PairLubricatePoly::init_style()
       wallhi[j] = domain->prd[j];
       walllo[j] = 0;
     }
+
     for (int m = 0; m < wallfix->nwall; m++){
       int dim = wallfix->wallwhich[m] / 2;
       int side = wallfix->wallwhich[m] % 2;
@@ -504,6 +608,7 @@ void PairLubricatePoly::init_style()
         //Since fix->wall->init happens after pair->init_style
         wallcoord = input->variable->compute_equal(wallfix->xindex[m]);
       }
+
       else wallcoord = wallfix->coord0[m];
 
       if (side == 0) walllo[dim] = wallcoord;
@@ -512,6 +617,9 @@ void PairLubricatePoly::init_style()
     vol_T = (wallhi[0] - walllo[0]) * (wallhi[1] - walllo[1]) *
       (wallhi[2] - walllo[2]);
   }
+
+  // vol_P = volume of particles
+  // vol_f = volume fraction
 
   double volP = 0.0;
   for (int i = 0; i < nlocal; i++)
@@ -522,7 +630,7 @@ void PairLubricatePoly::init_style()
 
   if (!flagVF) vol_f = 0;
 
-  // set isotropic constants
+  // set isotropic constants for FLD
 
   if (flaglog == 0) {
     R0  = 6*MY_PI*mu*(1.0 + 2.16*vol_f);
@@ -534,20 +642,195 @@ void PairLubricatePoly::init_style()
     RS0 = 20.0/3.0*MY_PI*mu*(1.0 + 3.64*vol_f - 6.95*vol_f*vol_f);
   }
 
-  // check for fix deform, if exists it must use "remap v"
-
-  shearing = 0;
-  for (int i = 0; i < modify->nfix; i++)
-    if (strcmp(modify->fix[i]->style,"deform") == 0) {
-      shearing = 1;
-      if (((FixDeform *) modify->fix[i])->remapflag != Domain::V_REMAP)
-        error->all(FLERR,"Using pair lubricate/poly with inconsistent "
-                   "fix deform remap option");
-    }
 
   // set Ef = 0 since used whether shearing or not
 
   Ef[0][0] = Ef[0][1] = Ef[0][2] = 0.0;
   Ef[1][0] = Ef[1][1] = Ef[1][2] = 0.0;
   Ef[2][0] = Ef[2][1] = Ef[2][2] = 0.0;
+}
+
+/* ----------------------------------------------------------------------
+   init for one type pair i,j and corresponding j,i
+------------------------------------------------------------------------- */
+
+double PairLubricatePoly::init_one(int i, int j)
+{
+  if (setflag[i][j] == 0) {
+    cut_inner[i][j] = mix_distance(cut_inner[i][i],cut_inner[j][j]);
+    cut[i][j] = mix_distance(cut[i][i],cut[j][j]);
+  }
+
+  cut_inner[j][i] = cut_inner[i][j];
+
+  return cut[i][j];
+}
+
+/* ----------------------------------------------------------------------
+   proc 0 writes to restart file
+------------------------------------------------------------------------- */
+
+void PairLubricatePoly::write_restart(FILE *fp)
+{
+  write_restart_settings(fp);
+
+  int i,j;
+  for (i = 1; i <= atom->ntypes; i++)
+    for (j = i; j <= atom->ntypes; j++) {
+      fwrite(&setflag[i][j],sizeof(int),1,fp);
+      if (setflag[i][j]) {
+        fwrite(&cut_inner[i][j],sizeof(double),1,fp);
+        fwrite(&cut[i][j],sizeof(double),1,fp);
+      }
+    }
+}
+
+/* ----------------------------------------------------------------------
+   proc 0 reads from restart file, bcasts
+------------------------------------------------------------------------- */
+
+void PairLubricatePoly::read_restart(FILE *fp)
+{
+  read_restart_settings(fp);
+  allocate();
+
+  int i,j;
+  int me = comm->me;
+  for (i = 1; i <= atom->ntypes; i++)
+    for (j = i; j <= atom->ntypes; j++) {
+      if (me == 0) utils::sfread(FLERR,&setflag[i][j],sizeof(int),1,fp,nullptr,error);
+      MPI_Bcast(&setflag[i][j],1,MPI_INT,0,world);
+      if (setflag[i][j]) {
+        if (me == 0) {
+          utils::sfread(FLERR,&cut_inner[i][j],sizeof(double),1,fp,nullptr,error);
+          utils::sfread(FLERR,&cut[i][j],sizeof(double),1,fp,nullptr,error);
+        }
+        MPI_Bcast(&cut_inner[i][j],1,MPI_DOUBLE,0,world);
+        MPI_Bcast(&cut[i][j],1,MPI_DOUBLE,0,world);
+      }
+    }
+}
+
+/* ----------------------------------------------------------------------
+   proc 0 writes to restart file
+------------------------------------------------------------------------- */
+
+void PairLubricatePoly::write_restart_settings(FILE *fp)
+{
+  fwrite(&mu,sizeof(double),1,fp);
+  fwrite(&flaglog,sizeof(int),1,fp);
+  fwrite(&flagfld,sizeof(int),1,fp);
+  fwrite(&cut_inner_global,sizeof(double),1,fp);
+  fwrite(&cut_global,sizeof(double),1,fp);
+  fwrite(&offset_flag,sizeof(int),1,fp);
+  fwrite(&mix_flag,sizeof(int),1,fp);
+  fwrite(&flagHI,sizeof(int),1,fp);
+  fwrite(&flagVF,sizeof(int),1,fp);
+}
+
+/* ----------------------------------------------------------------------
+   proc 0 reads from restart file, bcasts
+------------------------------------------------------------------------- */
+
+void PairLubricatePoly::read_restart_settings(FILE *fp)
+{
+  int me = comm->me;
+  if (me == 0) {
+    utils::sfread(FLERR,&mu,sizeof(double),1,fp,nullptr,error);
+    utils::sfread(FLERR,&flaglog,sizeof(int),1,fp,nullptr,error);
+    utils::sfread(FLERR,&flagfld,sizeof(int),1,fp,nullptr,error);
+    utils::sfread(FLERR,&cut_inner_global,sizeof(double),1,fp,nullptr,error);
+    utils::sfread(FLERR,&cut_global,sizeof(double),1,fp,nullptr,error);
+    utils::sfread(FLERR,&offset_flag,sizeof(int),1,fp,nullptr,error);
+    utils::sfread(FLERR,&mix_flag,sizeof(int),1,fp,nullptr,error);
+    utils::sfread(FLERR,&flagHI,sizeof(int),1,fp,nullptr,error);
+    utils::sfread(FLERR,&flagVF,sizeof(int),1,fp,nullptr,error);
+  }
+  MPI_Bcast(&mu,1,MPI_DOUBLE,0,world);
+  MPI_Bcast(&flaglog,1,MPI_INT,0,world);
+  MPI_Bcast(&flagfld,1,MPI_INT,0,world);
+  MPI_Bcast(&cut_inner_global,1,MPI_DOUBLE,0,world);
+  MPI_Bcast(&cut_global,1,MPI_DOUBLE,0,world);
+  MPI_Bcast(&offset_flag,1,MPI_INT,0,world);
+  MPI_Bcast(&mix_flag,1,MPI_INT,0,world);
+  MPI_Bcast(&flagHI,1,MPI_INT,0,world);
+  MPI_Bcast(&flagVF,1,MPI_INT,0,world);
+}
+
+/* ---------------------------------------------------------------------- */
+
+int PairLubricatePoly::pack_forward_comm(int n, int *list, double *buf,
+                                     int /*pbc_flag*/, int * /*pbc*/)
+{
+  int i,j,m;
+
+  double **v = atom->v;
+  double **omega = atom->omega;
+
+  m = 0;
+  for (i = 0; i < n; i++) {
+    j = list[i];
+    buf[m++] = v[j][0];
+    buf[m++] = v[j][1];
+    buf[m++] = v[j][2];
+    buf[m++] = omega[j][0];
+    buf[m++] = omega[j][1];
+    buf[m++] = omega[j][2];
+  }
+
+  return m;
+}
+
+/* ---------------------------------------------------------------------- */
+
+void PairLubricatePoly::unpack_forward_comm(int n, int first, double *buf)
+{
+  int i,m,last;
+
+  double **v = atom->v;
+  double **omega = atom->omega;
+
+  m = 0;
+  last = first + n;
+  for (i = first; i < last; i++) {
+    v[i][0] = buf[m++];
+    v[i][1] = buf[m++];
+    v[i][2] = buf[m++];
+    omega[i][0] = buf[m++];
+    omega[i][1] = buf[m++];
+    omega[i][2] = buf[m++];
+  }
+}
+
+/* ----------------------------------------------------------------------
+   check if name is recognized, return integer index for that name
+   if name not recognized, return -1
+   if type pair setting, return -2 if no type pairs are set
+------------------------------------------------------------------------- */
+
+int PairLubricatePoly::pre_adapt(char *name, int /*ilo*/, int /*ihi*/, int /*jlo*/, int /*jhi*/)
+{
+  if (strcmp(name,"mu") == 0) return 0;
+  return -1;
+}
+
+/* ----------------------------------------------------------------------
+   adapt parameter indexed by which
+   change all pair variables affected by the reset parameter
+   if type pair setting, set I-J and J-I coeffs
+------------------------------------------------------------------------- */
+
+void PairLubricatePoly::adapt(int /*which*/, int /*ilo*/, int /*ihi*/, int /*jlo*/, int /*jhi*/,
+                          double value)
+{
+  mu = value;
+}
+
+
+double PairLubricatePoly::single(int i, int j, int /*itype*/, int /*jtype*/,
+                                    double rsq,
+                                    double /*factor_coul*/, double /*factor_lj*/,
+                                    double &fforce)
+{
+  return 0;
 }
