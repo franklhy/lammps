@@ -1,0 +1,42 @@
+LAMMPS data file via write_data, version 30 Mar 2026, timestep = 20, units = lj
+
+3 atoms
+3 atom types
+1 bonds
+1 bond types
+
+0 10 xlo xhi
+0 10 ylo yhi
+0 10 zlo zhi
+
+Masses
+
+1 1
+2 1
+3 1
+
+Pair Coeffs # lj/cut
+
+1 0 1
+2 0 1
+3 0 1
+
+Bond Coeffs # harmonic
+
+1 30 1
+
+Atoms # bond
+
+3 2 2 4 5 5 0 0 0
+1 1 1 5 5 5 0 0 0
+2 1 3 6 5 5 0 0 0
+
+Velocities
+
+3 0.319210871129154 -0.4051043409575571 0.4963382857174632
+1 0.8791665885934823 1.3463861094707716 0.22966869674027862
+2 -1.1983774597226362 -0.9412817685132145 -0.7260069824577422
+
+Bonds
+
+1 1 1 2

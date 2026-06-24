@@ -1,0 +1,27 @@
+MPI cross-rank exchange test data for fix bond/exchange/assoc
+
+3 atoms
+1 bonds
+
+3 atom types
+1 bond types
+
+0.0 20.0 xlo xhi
+0.0 10.0 ylo yhi
+0.0 10.0 zlo zhi
+
+Masses
+
+1 1.0
+2 1.0
+3 1.0
+
+Atoms # bond
+
+1 1 1 9.9 5.0 5.0
+2 1 3 9.0 5.0 5.0
+3 2 2 10.8 5.0 5.0
+
+Bonds
+
+1 1 1 2

@@ -1,0 +1,47 @@
+# pkin-scaling test for fix bond/exchange/assoc, pkin = 1.0.
+#
+# Run from the MC/test/pkin_scaling directory, e.g.
+#   lmp -in in.fix_bond_exchange_assoc_pkin_1.0
+#
+# The old and new B-A distances are both 1.0 and pair epsilon is zero, so every
+# generated proposal has dU = 0 and should be accepted.  Therefore f_xchg should
+# remain near 1, while f_xchg[2] should be close to pkin * f_xchg[1].
+
+log             log.fix_bond_exchange_assoc_pkin_1.0
+
+units           lj
+atom_style      bond
+boundary        p p p
+atom_modify     map array
+
+read_data       data.fix_bond_exchange_assoc_pkin
+
+pair_style      lj/cut 1.122462048
+pair_coeff      * * 0.0 1.0 1.122462048
+
+bond_style      harmonic
+bond_coeff      1 30.0 1.0
+
+special_bonds   lj 0.0 1.0 1.0 coul 0.0 1.0 1.0
+
+neighbor        0.3 bin
+neigh_modify    every 1 delay 0 check yes
+
+velocity        all create 1.0 24681357 mom yes rot no dist gaussian
+timestep        0.0
+
+variable        pkin equal 1.0
+variable        nsteps equal 100000
+variable        accept_expected equal v_pkin*v_nsteps
+variable        skip_expected equal (1.0-v_pkin)*v_nsteps
+
+fix             integ all nve
+fix             xchg all bond/exchange/assoc 1 1 111001 0.8 1.2 &
+                pivot_type 1 free_type 2 bound_type 3 bond_type 1 pkin 1.0 &
+                defensive_checks no
+
+thermo          10000
+thermo_style    custom step v_pkin v_accept_expected v_skip_expected f_xchg &
+                f_xchg[1] f_xchg[2] f_xchg[3] f_xchg[7]
+
+run             ${nsteps}

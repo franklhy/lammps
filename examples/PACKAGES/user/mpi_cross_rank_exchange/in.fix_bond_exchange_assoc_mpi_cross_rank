@@ -1,0 +1,69 @@
+# MPI cross-rank exchange test for fix bond/exchange/assoc.
+#
+# Run from the MC/test/mpi_cross_rank_exchange directory with two MPI ranks, e.g.
+#   mpirun -np 2 lmp -in in.fix_bond_exchange_assoc_mpi_cross_rank
+#
+# The processor grid is forced to 2 x 1 x 1.  With the 0 <= x < 20 box, the
+# domain split is near x = 10.  The pivot B is placed at x = 9.9, the initial
+# bound A at x = 9.0, and the free attacking A at x = 10.8.  Thus the attacking
+# atom should be owned by the other MPI rank while remaining within the reactive
+# window and ghost cutoff of the pivot rank.
+#
+# The atom dump includes c_owner from compute property/atom proc, so the output
+# records which rank owns each atom as the type labels and dynamic bond endpoint
+# are exchanged.
+
+log             log.fix_bond_exchange_assoc_mpi_cross_rank
+
+units           lj
+atom_style      bond
+boundary        p p p
+processors      2 1 1
+atom_modify     map array
+
+read_data       data.fix_bond_exchange_assoc_mpi_cross_rank
+
+pair_style      lj/cut 1.122462048
+pair_coeff      * * 0.0 1.0 1.122462048
+
+bond_style      harmonic
+bond_coeff      1 30.0 1.0
+
+special_bonds   lj 0.0 1.0 1.0 coul 0.0 1.0 1.0
+
+neighbor        0.3 bin
+neigh_modify    every 1 delay 0 check yes
+
+velocity        all create 1.0 864209 mom yes rot no dist gaussian
+timestep        0.0
+
+variable        is_free atom type==2
+variable        is_bound atom type==3
+compute         nfree all reduce sum v_is_free
+compute         nbound all reduce sum v_is_bound
+
+compute         bondinfo all property/local btype batom1 batom2
+compute         ndynamic all reduce sum c_bondinfo[1] inputs local
+
+compute         owner all property/atom proc
+
+fix             integ all nve
+fix             xchg all bond/exchange/assoc 1 1 13579 0.8 1.2 &
+                pivot_type 1 free_type 2 bound_type 3 bond_type 1 pkin 1.0 &
+                defensive_checks yes
+
+thermo          1
+thermo_style    custom step c_nfree c_nbound c_ndynamic f_xchg f_xchg[1] &
+                f_xchg[2] f_xchg[3] f_xchg[4] f_xchg[5] f_xchg[6] f_xchg[7]
+thermo_modify   norm no
+
+dump            states all custom 1 dump.fix_bond_exchange_assoc_mpi_cross_rank &
+                id type mol c_owner x y z
+dump_modify     states sort id
+
+dump            bonds all local 1 dump.fix_bond_exchange_assoc_mpi_cross_rank.bonds &
+                index c_bondinfo[1] c_bondinfo[2] c_bondinfo[3]
+
+run             10
+
+write_data      data.fix_bond_exchange_assoc_mpi_cross_rank.after
